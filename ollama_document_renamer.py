@@ -170,6 +170,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--exclude-git-repos",
+        action="store_true",
+        help=(
+            "Do not descend into subdirectories that are Git repository roots "
+            "(contain a .git file or directory). The scan root itself is still scanned."
+        ),
+    )
+    parser.add_argument(
         "--write-spotlight-comment",
         action="store_true",
         help="Write a macOS Spotlight/Finder comment using the summary and extracted metadata",
@@ -308,6 +316,7 @@ def main() -> int:
             include_hidden=args.include_hidden,
             exclude_globs=exclude_globs,
             exclude_regexes=exclude_regexes,
+            exclude_git_repos=args.exclude_git_repos,
         )
     )
     if completed_renamed:
@@ -487,12 +496,21 @@ def _is_excluded_rel_path(
     return False
 
 
+def _is_git_repo_root(dir_path: Path) -> bool:
+    """True if dir_path looks like a Git working tree (nested repo), not necessarily the scan root."""
+    try:
+        return (dir_path / ".git").exists()
+    except OSError:
+        return False
+
+
 def iter_files(
     root: Path,
     include_hidden: bool,
     *,
     exclude_globs: Sequence[str] = (),
     exclude_regexes: Sequence[re.Pattern[str]] = (),
+    exclude_git_repos: bool = False,
 ) -> Iterable[Path]:
     root = root.resolve()
     exclude_globs = tuple(exclude_globs)
@@ -503,7 +521,10 @@ def iter_files(
         for d in dirnames:
             if not include_hidden and d.startswith("."):
                 continue
-            rel = (current_path / d).relative_to(root).as_posix()
+            child = current_path / d
+            if exclude_git_repos and _is_git_repo_root(child):
+                continue
+            rel = child.relative_to(root).as_posix()
             if _is_excluded_rel_path(rel, d, exclude_globs, exclude_regexes):
                 continue
             kept_dirs.append(d)
