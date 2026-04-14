@@ -258,8 +258,14 @@ def _drain_executor_futures(
     pending = set(futures)
     interrupted = False
     while pending:
-        done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
-        for future in done:
+        completed, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+        # Cancelled futures may be `done()` without appearing in `completed` on some
+        # Python versions, which would otherwise spin until timeout forever.
+        for f in list(pending):
+            if f.done():
+                pending.remove(f)
+                completed.add(f)
+        for future in completed:
             try:
                 outcome = future.result()
             except CancelledError:

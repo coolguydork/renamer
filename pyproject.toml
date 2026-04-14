@@ -39,3 +39,11 @@ only-include = [
   "ollama_document_renamer.py",
   "macos_ocr.swift",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
