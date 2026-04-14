@@ -23,6 +23,8 @@ from threading import Lock
 from typing import Iterable
 from urllib.parse import urlparse
 
+from tqdm import tqdm
+
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 MAX_TEXT_CHARS = 12000
@@ -172,6 +174,11 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of files to process in parallel (default: %(default)s)",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable the progress bar (it is off automatically when stderr is not a TTY)",
+    )
     return parser.parse_args()
 
 
@@ -204,6 +211,8 @@ def main() -> int:
         print("--workers must be at least 1", file=sys.stderr)
         return 1
 
+    show_progress = sys.stderr.isatty() and not args.no_progress
+
     audit_handle = None
     write_lock = Lock()
     try:
@@ -211,7 +220,16 @@ def main() -> int:
             audit_handle = audit_log.open("w", encoding="utf-8")
 
         if args.workers == 1:
-            for file_path in files:
+            file_iter: Iterable[Path] = files
+            if show_progress:
+                file_iter = tqdm(
+                    files,
+                    total=len(files),
+                    unit="file",
+                    desc="Renaming",
+                    file=sys.stderr,
+                )
+            for file_path in file_iter:
                 outcome = process_file(
                     file_path=file_path,
                     text_model=args.model,
@@ -249,9 +267,21 @@ def main() -> int:
                     )
                     for file_path in files
                 ]
-                for future in as_completed(futures):
-                    outcome = future.result()
-                    report_outcome(outcome, dry_run=args.dry_run)
+                if show_progress:
+                    with tqdm(
+                        total=len(futures),
+                        unit="file",
+                        desc="Renaming",
+                        file=sys.stderr,
+                    ) as pbar:
+                        for future in as_completed(futures):
+                            outcome = future.result()
+                            report_outcome(outcome, dry_run=args.dry_run)
+                            pbar.update(1)
+                else:
+                    for future in as_completed(futures):
+                        outcome = future.result()
+                        report_outcome(outcome, dry_run=args.dry_run)
     finally:
         if audit_handle is not None:
             audit_handle.close()
