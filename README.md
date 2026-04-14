@@ -131,6 +131,7 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 | `--include-hidden` | off | Include hidden files and directories (names starting with `.`). |
 | `--exclude-glob` | *(repeatable)* | Skip directories (do not descend into them) and files matching a shell-style glob (`fnmatch`). Repeat for multiple patterns. If the pattern contains no `/`, it matches only the **final path component** (e.g. `node_modules`, `*.tmp`). If it contains `/`, it matches the **full path relative to the scan root**. |
 | `--exclude-regex` | *(repeatable)* | Skip directories and files whose path **relative to the scan root** matches a Python regular expression (repeatable). Paths use `/` separators. Matching uses `re.search()` over that relative path. Invalid patterns exit with an error. |
+| `--exclude-git-repos` | off | Do not descend into **subdirectories** that are Git repository roots (they contain a `.git` file or directory). The directory you pass as the scan root is still fully scanned. |
 
 ### macOS Finder and PDF metadata
 
