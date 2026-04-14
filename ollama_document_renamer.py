@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import signal
 import mimetypes
 import os
 import plistlib
@@ -16,10 +17,10 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Iterable
 from urllib.parse import urlparse
 
@@ -190,6 +191,59 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _install_graceful_interrupt_handlers(shutdown: Event) -> tuple[object, object | None]:
+    def handler(signum: int, frame) -> None:  # noqa: ARG001
+        if signum == signal.SIGINT and shutdown.is_set():
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.raise_signal(signal.SIGINT)
+        if not shutdown.is_set():
+            print(
+                "\nInterrupt: stopping; in-flight work will finish, queued work is cancelled.",
+                file=sys.stderr,
+            )
+        shutdown.set()
+
+    old_int = signal.signal(signal.SIGINT, handler)
+    old_term = None
+    if hasattr(signal, "SIGTERM"):
+        old_term = signal.signal(signal.SIGTERM, handler)
+    return old_int, old_term
+
+
+def _restore_graceful_interrupt_handlers(old_sigint: object, old_sigterm: object | None) -> None:
+    signal.signal(signal.SIGINT, old_sigint)
+    if old_sigterm is not None:
+        signal.signal(signal.SIGTERM, old_sigterm)
+
+
+def _drain_executor_futures(
+    futures: list,
+    shutdown: Event,
+    *,
+    dry_run: bool,
+    pbar: object | None,
+) -> bool:
+    """Process futures as they complete; return True if stopped early due to interrupt."""
+    pending = set(futures)
+    interrupted = False
+    while pending:
+        done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+        for future in done:
+            try:
+                outcome = future.result()
+            except CancelledError:
+                if pbar is not None:
+                    pbar.update(1)
+                continue
+            report_outcome(outcome, dry_run=dry_run)
+            if pbar is not None:
+                pbar.update(1)
+        if shutdown.is_set():
+            interrupted = True
+            break
+    return interrupted
+
+
 def main() -> int:
     args = parse_args()
     target_dir = args.directory.expanduser().resolve()
@@ -237,8 +291,11 @@ def main() -> int:
 
     show_progress = sys.stderr.isatty() and not args.no_progress
 
+    shutdown = Event()
+    old_sigint, old_sigterm = _install_graceful_interrupt_handlers(shutdown)
     audit_handle = None
     write_lock = Lock()
+    interrupted = False
     try:
         if not args.dry_run:
             if args.overwrite or not audit_log.exists():
@@ -259,6 +316,9 @@ def main() -> int:
                     file=sys.stderr,
                 )
             for file_path in file_iter:
+                if shutdown.is_set():
+                    interrupted = True
+                    break
                 outcome = process_file(
                     file_path=file_path,
                     text_model=args.model,
@@ -276,7 +336,8 @@ def main() -> int:
                 )
                 report_outcome(outcome, dry_run=args.dry_run)
         else:
-            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=args.workers)
+            try:
                 futures = [
                     executor.submit(
                         process_file,
@@ -303,17 +364,29 @@ def main() -> int:
                         desc="Renaming",
                         file=sys.stderr,
                     ) as pbar:
-                        for future in as_completed(futures):
-                            outcome = future.result()
-                            report_outcome(outcome, dry_run=args.dry_run)
-                            pbar.update(1)
+                        interrupted = _drain_executor_futures(
+                            futures,
+                            shutdown,
+                            dry_run=args.dry_run,
+                            pbar=pbar,
+                        )
                 else:
-                    for future in as_completed(futures):
-                        outcome = future.result()
-                        report_outcome(outcome, dry_run=args.dry_run)
+                    interrupted = _drain_executor_futures(
+                        futures,
+                        shutdown,
+                        dry_run=args.dry_run,
+                        pbar=None,
+                    )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
     finally:
+        _restore_graceful_interrupt_handlers(old_sigint, old_sigterm)
         if audit_handle is not None:
             audit_handle.close()
+
+    if interrupted:
+        print("Stopped early by interrupt.", file=sys.stderr)
+        return 130
 
     return 0
 
