@@ -124,7 +124,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Allow overwriting existing audit log file if present",
+        help="Allow overwriting existing audit log file if present (starts fresh; ignores --resume)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip files already recorded in the audit log and append new entries "
+            "(use after an interrupted run with the same --audit-log and directory)"
+        ),
     )
     parser.add_argument(
         "--audit-log",
@@ -192,14 +200,30 @@ def main() -> int:
         print(f"Directory not found: {target_dir}", file=sys.stderr)
         return 1
 
-    if audit_log.exists() and not args.overwrite and not args.dry_run:
+    if audit_log.exists() and not args.overwrite and not args.dry_run and not args.resume:
         print(
-            f"Audit log already exists: {audit_log}. Use --overwrite or a different path.",
+            f"Audit log already exists: {audit_log}. Use --overwrite, --resume, or a different path.",
             file=sys.stderr,
         )
         return 1
 
+    resume_active = args.resume and not args.overwrite
+    completed_renamed: set[Path] = set()
+    if resume_active:
+        completed_renamed = load_completed_renamed_paths(audit_log, target_dir)
+        if completed_renamed:
+            print(
+                f"Resume: loaded {len(completed_renamed)} completed path(s) from {audit_log}",
+                file=sys.stderr,
+            )
+
     files = list(iter_files(target_dir, include_hidden=args.include_hidden))
+    if completed_renamed:
+        before = len(files)
+        files = [p for p in files if p.resolve() not in completed_renamed]
+        skipped = before - len(files)
+        if skipped:
+            print(f"Resume: skipping {skipped} file(s) already in the audit log.", file=sys.stderr)
     if args.max_files is not None:
         files = files[: args.max_files]
 
@@ -217,7 +241,12 @@ def main() -> int:
     write_lock = Lock()
     try:
         if not args.dry_run:
-            audit_handle = audit_log.open("w", encoding="utf-8")
+            if args.overwrite or not audit_log.exists():
+                audit_handle = audit_log.open("w", encoding="utf-8")
+            elif args.resume:
+                audit_handle = audit_log.open("a", encoding="utf-8")
+            else:
+                audit_handle = audit_log.open("w", encoding="utf-8")
 
         if args.workers == 1:
             file_iter: Iterable[Path] = files
@@ -287,6 +316,39 @@ def main() -> int:
             audit_handle.close()
 
     return 0
+
+
+def load_completed_renamed_paths(audit_path: Path, root: Path) -> set[Path]:
+    """Resolved paths of outputs already recorded in the audit (successful renames)."""
+    root_resolved = root.resolve()
+    completed: set[Path] = set()
+    if not audit_path.is_file():
+        return completed
+    try:
+        with audit_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                renamed = row.get("renamed_path")
+                if not renamed or not isinstance(renamed, str):
+                    continue
+                try:
+                    p = Path(renamed).expanduser().resolve()
+                except OSError:
+                    continue
+                try:
+                    p.relative_to(root_resolved)
+                except ValueError:
+                    continue
+                completed.add(p)
+    except OSError:
+        return completed
+    return completed
 
 
 def iter_files(root: Path, include_hidden: bool) -> Iterable[Path]:
