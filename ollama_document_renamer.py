@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fnmatch
 import json
 import signal
 import mimetypes
@@ -21,7 +22,7 @@ from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecut
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock
-from typing import Iterable
+from typing import Iterable, Sequence
 from urllib.parse import urlparse
 
 from tqdm import tqdm
@@ -147,6 +148,28 @@ def parse_args() -> argparse.Namespace:
         help="Include hidden files and directories",
     )
     parser.add_argument(
+        "--exclude-glob",
+        action="append",
+        default=None,
+        metavar="PATTERN",
+        help=(
+            "Skip directories (do not descend) and files matching this glob; "
+            "repeatable. Shell-style globs (fnmatch). If PATTERN contains no '/', "
+            "it matches only the final path component (e.g. node_modules, *.tmp). "
+            "If it contains '/', it matches the whole path relative to the scan root."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-regex",
+        action="append",
+        default=None,
+        metavar="PATTERN",
+        help=(
+            "Skip directories and files whose path relative to the scan root matches "
+            "this Python regex (repeatable); paths use '/' separators."
+        ),
+    )
+    parser.add_argument(
         "--write-spotlight-comment",
         action="store_true",
         help="Write a macOS Spotlight/Finder comment using the summary and extracted metadata",
@@ -249,6 +272,14 @@ def main() -> int:
     target_dir = args.directory.expanduser().resolve()
     audit_log = args.audit_log.expanduser().resolve()
     vision_model = args.vision_model or args.model
+    exclude_globs = tuple(args.exclude_glob or ())
+    exclude_regexes: list[re.Pattern[str]] = []
+    for pat in args.exclude_regex or ():
+        try:
+            exclude_regexes.append(re.compile(pat))
+        except re.error as exc:
+            print(f"Invalid --exclude-regex {pat!r}: {exc}", file=sys.stderr)
+            return 1
 
     if not target_dir.is_dir():
         print(f"Directory not found: {target_dir}", file=sys.stderr)
@@ -271,7 +302,14 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    files = list(iter_files(target_dir, include_hidden=args.include_hidden))
+    files = list(
+        iter_files(
+            target_dir,
+            include_hidden=args.include_hidden,
+            exclude_globs=exclude_globs,
+            exclude_regexes=exclude_regexes,
+        )
+    )
     if completed_renamed:
         before = len(files)
         files = [p for p in files if p.resolve() not in completed_renamed]
@@ -424,15 +462,60 @@ def load_completed_renamed_paths(audit_path: Path, root: Path) -> set[Path]:
     return completed
 
 
-def iter_files(root: Path, include_hidden: bool) -> Iterable[Path]:
-    for current_root, dirnames, filenames in os.walk(root):
+def _path_matches_exclude_glob(rel_posix: str, basename: str, pattern: str) -> bool:
+    if "/" in pattern:
+        return fnmatch.fnmatch(rel_posix, pattern)
+    return fnmatch.fnmatch(basename, pattern)
+
+
+def _path_matches_exclude_regex(rel_posix: str, pattern: re.Pattern[str]) -> bool:
+    return pattern.search(rel_posix) is not None
+
+
+def _is_excluded_rel_path(
+    rel_posix: str,
+    basename: str,
+    exclude_globs: Sequence[str],
+    exclude_regexes: Sequence[re.Pattern[str]],
+) -> bool:
+    for g in exclude_globs:
+        if _path_matches_exclude_glob(rel_posix, basename, g):
+            return True
+    for rx in exclude_regexes:
+        if _path_matches_exclude_regex(rel_posix, rx):
+            return True
+    return False
+
+
+def iter_files(
+    root: Path,
+    include_hidden: bool,
+    *,
+    exclude_globs: Sequence[str] = (),
+    exclude_regexes: Sequence[re.Pattern[str]] = (),
+) -> Iterable[Path]:
+    root = root.resolve()
+    exclude_globs = tuple(exclude_globs)
+    exclude_regexes = tuple(exclude_regexes)
+    for current_root, dirnames, filenames in os.walk(root, topdown=True):
         current_path = Path(current_root)
-        if not include_hidden:
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        kept_dirs: list[str] = []
+        for d in dirnames:
+            if not include_hidden and d.startswith("."):
+                continue
+            rel = (current_path / d).relative_to(root).as_posix()
+            if _is_excluded_rel_path(rel, d, exclude_globs, exclude_regexes):
+                continue
+            kept_dirs.append(d)
+        dirnames[:] = kept_dirs
+
         for filename in filenames:
             if not include_hidden and filename.startswith("."):
                 continue
             if filename.lower() in SKIP_FILENAMES:
+                continue
+            rel = (current_path / filename).relative_to(root).as_posix()
+            if _is_excluded_rel_path(rel, filename, exclude_globs, exclude_regexes):
                 continue
             path = current_path / filename
             if path.is_file():
