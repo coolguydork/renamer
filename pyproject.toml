@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Scan a directory, summarize files with local Ollama, and rename to descriptive titles"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+  "tqdm>=4.66.0",
+]
 keywords = ["ollama", "rename", "documents", "macos", "llm"]
 classifiers = [
   "Development Status :: 4 - Beta",
