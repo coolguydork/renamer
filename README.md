@@ -12,7 +12,7 @@ It is designed for messy document archives where filenames are numeric or otherw
 - Scanned PDFs and images using built-in macOS OCR via Vision
 - Images and scanned PDFs by sending an image preview to a vision-capable Ollama model
 
-For every supported file, the model now attempts to extract:
+For every supported file, the model attempts to extract:
 
 - A concise filename-safe title
 - A short summary
@@ -20,19 +20,37 @@ For every supported file, the model now attempts to extract:
 
 ## Requirements
 
-- macOS
-- Python 3
-- A running local Ollama server, usually via `ollama serve`
+- **macOS**
+- **Python 3.10+** (see `pyproject.toml`)
+- A running local **Ollama** server, usually via `ollama serve`
 - A model for text analysis, and ideally a vision-capable model for scanned pages
-- `swift` available on macOS for the built-in OCR helper
+- **`swift`** on your PATH (Xcode Command Line Tools) for the bundled macOS helpers: OCR, PDF page rendering, optional PDFKit resave, and PDF preview when `--pdf-preview-page` is greater than `1`
 
 Examples of possible models:
 
 - Text: `llama3.2`, `mistral`, `qwen2.5`
 - Vision: `llava`, `llama3.2-vision`
 
-Use `ollama list` to see which models are actually installed on your machine. The script will now report installed model names if you pass one that is missing.
+Use `ollama list` to see which models are actually installed on your machine. The script reports installed model names if you pass one that is missing.
+
 The HTTP integration uses Ollama's current `/api/chat` and `/api/tags` endpoints, with `http://127.0.0.1:11434` as the default base URL.
+
+### Optional command-line tools
+
+| Tool | Used for |
+| ---- | -------- |
+| **`exiftool`** | Writing and validating PDF metadata (`--write-pdf-metadata`, validation) |
+| **`qpdf`** | Rewriting damaged PDFs (`--repair-pdf-if-needed`) |
+| **`xattr`** | Finder / Spotlight comments (`--write-spotlight-comment`) |
+| **`mdls`**, **`qlmanage`** | Extra checks after PDF metadata writes (`--validate-pdf-after-write`) |
+
+### Bundled Swift sources (next to `ollama_document_renamer.py`)
+
+| File | Role |
+| ---- | ---- |
+| `macos_ocr.swift` | Vision OCR for images and PDF previews |
+| `macos_pdf_page_render.swift` | Render a chosen PDF page when `--pdf-preview-page` is greater than `1` |
+| `macos_pdf_resave.swift` | PDFKit resave when `--repair-pdf-macos-pdfkit` is enabled |
 
 ## Running the script
 
@@ -72,13 +90,13 @@ python3 /path/to/ollama_document_renamer.py /path/to/archive \
 
 ## Add conservative PDF metadata
 
-For PDFs, the script can also write a conservative set of native metadata fields in both PDF Info and XMP. This mode is designed to prioritize safety:
+For PDFs, the script can write a conservative set of native metadata fields in both PDF Info and XMP. This mode prioritizes safety:
 
-- It only attempts PDF metadata writes for `.pdf` files
-- It skips PDFs that appear encrypted
-- It skips PDFs that appear digitally signed
-- It creates a backup copy before any metadata update
-- It can optionally validate the PDF after writing and restore the backup automatically if validation fails
+- Only attempts metadata writes for `.pdf` files
+- Skips PDFs that appear encrypted
+- Skips PDFs that appear digitally signed
+- Creates a backup copy before any metadata update
+- Can optionally validate the PDF after writing and restore the backup automatically if validation fails
 
 ```bash
 python3 /path/to/ollama_document_renamer.py /path/to/archive \
@@ -92,9 +110,9 @@ Metadata writes use **`exiftool`** when it is installed.
 
 ## PDF preview page and optional repair
 
-- **`--pdf-preview-page`** — For OCR and vision preview, render a specific **1-based** page (default `1`). Use when the first page is a blank cover or not representative.
-- **`--repair-pdf-if-needed`** — Before analysis, detect PDFs that **`exiftool`** cannot read (for example bad xref tables) or that fail **`qpdf --check`**, then rewrite them in place with **`qpdf`**. Requires **`qpdf`** on your PATH (`brew install qpdf`). Creates a backup beside the file (suffix from **`--pdf-repair-backup-suffix`**, default `.qpdf-repair-backup.pdf`). Skips encrypted PDFs.
-- **`--repair-pdf-macos-pdfkit`** — When a PDF is unreadable by **`exiftool`**, resave it with **PDFKit** (the same macOS framework Preview uses for many save paths). Closest automated equivalent to opening in Preview and printing/saving as PDF. Requires **`swift`** and the bundled **`macos_pdf_resave.swift`**. Use **alone** (no `qpdf`), or **together with** `--repair-pdf-if-needed` to run **`qpdf` first** and PDFKit **only if** the file is **still** unreadable. Backup suffix: **`--pdf-pdfkit-repair-backup-suffix`** (default `.pdfkit-repair-backup.pdf`).
+- **`--pdf-preview-page`** — For OCR and vision preview, render a specific **1-based** page (default `1`). Use when the first page is a blank cover or not representative. Values greater than `1` use the bundled **`macos_pdf_page_render.swift`** (and **`qlmanage`** for page `1`).
+- **`--repair-pdf-if-needed`** — Before analysis, detect PDFs that **`exiftool`** cannot read (for example bad xref tables) or that fail **`qpdf --check`**, then rewrite them in place with **`qpdf`**. Requires **`qpdf`** on your PATH (`brew install qpdf`). Creates a backup beside the file (`--pdf-repair-backup-suffix`, default `.qpdf-repair-backup.pdf`). Encrypted PDFs are skipped.
+- **`--repair-pdf-macos-pdfkit`** — When a PDF is unreadable by **`exiftool`**, resave it with **PDFKit** (same macOS stack family as Preview for many save paths). Requires **`swift`** and **`macos_pdf_resave.swift`**. Use **alone** (no `qpdf`), or **with** `--repair-pdf-if-needed` so **`qpdf` runs first** and PDFKit runs **only if** the file is **still** unreadable. Backup: `--pdf-pdfkit-repair-backup-suffix` (default `.pdfkit-repair-backup.pdf`). Encrypted PDFs are skipped.
 
 ```bash
 python3 /path/to/ollama_document_renamer.py /path/to/archive \
@@ -106,9 +124,27 @@ python3 /path/to/ollama_document_renamer.py /path/to/archive \
   --write-pdf-metadata
 ```
 
+## Audit log (`rename_audit.jsonl`)
+
+Each real run (not `--dry-run`) appends **one JSON object per file** to the audit log (default **`rename_audit.jsonl`**; override with **`--audit-log`**).
+
+| `status` | Meaning |
+| -------- | ------- |
+| **`ok`** | Renamed successfully. Includes `original_path`, `renamed_path`, `summary`, `title`, `source_kind`, `metadata`. May include `pdf_repair_status` and `pdf_metadata_status` when those steps ran. |
+| **`skipped`** | No rename: `skipped_reason` explains why (and optional `pdf_repair_status`). |
+
+**`--resume`** skips inputs whose **successful** `renamed_path` already appears under the scan root; **`skipped`** lines do not block retries.
+
+Filter examples with **`jq`**:
+
+```bash
+jq 'select(.status == "skipped")' rename_audit.jsonl
+jq 'select(.status == "ok")' rename_audit.jsonl
+```
+
 ## Command-line reference
 
-All options match `ollama_document_renamer.py` (`python3 -m` is not used; run the file or the `ollama-document-renamer` entry point). Run with `--help` for the same text argparse prints.
+All options match `ollama_document_renamer.py` (run the file or the `ollama-document-renamer` entry point). Run with **`--help`** for argparse’s full text.
 
 ### Positional
 
@@ -134,13 +170,15 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 | `--no-progress` | off | Disable the tqdm progress bar (it stays off automatically when stderr is not a TTY). |
 | `--max-files` | *(none)* | Process at most the first *N* files after scanning and resume filtering. |
 
+Press **Ctrl+C** once to request a graceful stop: in-flight work finishes, queued work is cancelled, exit code **130**.
+
 ### Audit log
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--audit-log` | `rename_audit.jsonl` | Append-only JSONL: one object per file. Successful renames use `"status": "ok"` plus paths, summary, title, and metadata; failures use `"status": "skipped"` plus `skipped_reason` (and optional `pdf_repair_status`). |
+| `--audit-log` | `rename_audit.jsonl` | JSONL path (see [Audit log](#audit-log-rename_auditjsonl)). |
 | `--overwrite` | off | Allow replacing an existing audit log; starts a new log and **ignores `--resume`**. |
-| `--resume` | off | Skip files whose **successful** output path is already in the log; skipped/error lines do not count. Append new lines. Use with the same `directory` and `--audit-log` after an interrupted run. |
+| `--resume` | off | Skip files already successfully renamed per the log; append new lines. Same `directory` and `--audit-log` as the earlier run. |
 
 ### What gets scanned
 
@@ -160,7 +198,7 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 | `--pdf-backup-suffix` | `.metadata-backup.pdf` | Suffix for the backup copy created beside the PDF before metadata writes. |
 | `--validate-pdf-after-write` | off | After a metadata write, validate the PDF; restore the backup automatically if validation fails. |
 | `--delete-pdf-backup-on-success` | off | After a successful metadata write (and optional validation), delete the backup file. |
-| `--pdf-preview-page` | `1` | For PDF OCR and vision preview, render this **1-based** page (see section above). |
+| `--pdf-preview-page` | `1` | For PDF OCR and vision preview, render this **1-based** page (see [PDF preview page and optional repair](#pdf-preview-page-and-optional-repair)). |
 | `--repair-pdf-if-needed` | off | Before analysis, rewrite unreadable PDFs with **qpdf** (requires `qpdf` in PATH). |
 | `--pdf-repair-backup-suffix` | `.qpdf-repair-backup.pdf` | Backup suffix used before a qpdf repair. |
 | `--repair-pdf-macos-pdfkit` | off | Resave unreadable PDFs with **PDFKit** (`swift` + `macos_pdf_resave.swift`). Combine with `--repair-pdf-if-needed` to try qpdf first, then PDFKit if still unreadable. |
@@ -169,13 +207,13 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 ## Notes
 
 - The script preserves file extensions.
-- Analysis can now run in parallel across files, but the final rename and metadata-write step is still coordinated to avoid filename collisions and audit-log corruption.
+- Parallel **`--workers`** analyze files concurrently; renames and audit writes are coordinated so filenames and the JSONL log stay consistent.
 - If a generated filename already exists, the script appends ` 2`, ` 3`, and so on.
 - Finder comments are a practical cross-file search target on macOS even when file formats expose very different internal metadata fields.
-- PDF metadata mode uses `exiftool` to fill a conservative set of Info and XMP fields, including title, subject/description, keywords, and a small set of corresponding XMP labels (install `exiftool` if you use `--write-pdf-metadata`).
-- Optional PDF repair: `--repair-pdf-if-needed` uses `qpdf`; `--repair-pdf-macos-pdfkit` resaves via PDFKit (similar to fixing files in Preview).
-- Each PDF metadata update creates a backup copy next to the PDF by default, using the suffix `.metadata-backup.pdf`.
-- Validation mode checks that the edited PDF can still be read by `exiftool`, recognized by `mdls`, and rendered by macOS Quick Look before considering the write successful.
-- For scanned PDFs, the preview is usually based on the first page thumbnail, so a vision model works best when the first page is representative.
-- If your PDFs already contain embedded text, `--backend cli` can be enough even without a vision model.
-- Even without a vision model, scanned PDFs may still work because the script first tries local macOS OCR on a rendered preview.
+- PDF metadata mode uses **`exiftool`** for Info and XMP fields (install **`exiftool`** if you use **`--write-pdf-metadata`**).
+- PDF repair: **`--repair-pdf-if-needed`** uses **`qpdf`**; **`--repair-pdf-macos-pdfkit`** resaves via PDFKit (similar to re-saving in Preview). A PDFKit or qpdf rewrite can change the file bytes; **digitally signed PDFs** are skipped for metadata writes but **not** automatically skipped for repair—avoid repair flags on signed documents if signatures must stay valid.
+- Each PDF metadata update creates a backup next to the PDF by default (`--pdf-backup-suffix`).
+- Validation mode checks that the edited PDF can still be read by **`exiftool`**, recognized by **`mdls`**, and rendered by macOS Quick Look (**`qlmanage`**) before treating the write as successful.
+- For scanned PDFs, the preview is usually based on the first page thumbnail unless you set **`--pdf-preview-page`**, so a vision model works best when the chosen page is representative.
+- If your PDFs already contain embedded text, **`--backend cli`** can be enough even without a vision model.
+- Even without a vision model, scanned PDFs may still work because the script tries local macOS OCR on a rendered preview first.
