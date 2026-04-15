@@ -1,4 +1,4 @@
-"""Tests for destination naming, PDF backup paths, and PDF safety heuristics."""
+"""Tests for destination naming, PDF backups, and PDF safety heuristics."""
 
 from __future__ import annotations
 
@@ -24,11 +24,33 @@ def test_unique_destination_appends_counter(tmp_path: Path) -> None:
     assert dest.name == "T 2.txt"
 
 
-def test_unique_destination_same_file_not_infinite_loop(tmp_path: Path) -> None:
+def test_unique_destination_same_file_no_loop(tmp_path: Path) -> None:
     f = tmp_path / "T.txt"
     f.write_text("x", encoding="utf-8")
     dest = odr.unique_destination(f, "T")
     assert dest == f
+
+
+def test_unique_destination_strips_title_pdf_suffix(tmp_path: Path) -> None:
+    f = tmp_path / "old.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    dest = odr.unique_destination(f, "March 2025 Pay Stub Acme Corp.pdf")
+    assert dest.name == "March 2025 Pay Stub Acme Corp.pdf"
+    assert not dest.name.endswith(".pdf.pdf")
+
+
+def test_unique_destination_strips_double_pdf_suffix(tmp_path: Path) -> None:
+    f = tmp_path / "old.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    dest = odr.unique_destination(f, "Report.pdf.pdf")
+    assert dest.name == "Report.pdf"
+
+
+def test_unique_destination_extension_case_insensitive(tmp_path: Path) -> None:
+    f = tmp_path / "old.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    dest = odr.unique_destination(f, "Summary.PDF")
+    assert dest.name == "Summary.pdf"
 
 
 def test_build_pdf_backup_path_default_suffix() -> None:

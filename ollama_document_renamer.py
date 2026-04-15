@@ -32,6 +32,37 @@ OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 MAX_TEXT_CHARS = 12000
 TITLE_MAX_LENGTH = 120
 MAX_PDF_KEYWORDS = 24
+
+# Shared instructions for Ollama document analysis (text and vision paths).
+DOCUMENT_ANALYSIS_PROMPT_RULES = """
+Optimize for search and indexing first. The title becomes the filename (the file extension is preserved separately): it must be easy for a human to scan in a folder list and easy for desktop search, Spotlight, and PDF/metadata indexes to match real queries.
+
+The summary and metadata are equally important for search: many tools index title, description or subject, and keywords separately. Align wording so the same high-value terms appear where appropriate across title, summary, keywords, dates, identifiers, people, organizations, and document_type.
+
+Title (filename stem) rules:
+- Write the title as a compact line of high-signal tokens, not a sentence. Prefer this order when the facts exist: primary date or period anchor, then document type, then main parties or entities, then distinguishing identifiers (invoice number, case number, account suffix, policy number, form name and tax year, etc.).
+- Use plain language and real names as shown on the document. Do not use generic fillers such as: document, scan, copy, misc, important, new, final, updated, unless needed to disambiguate two otherwise identical files.
+- Aim for roughly 4 to 12 short segments (words or hyphenated tokens); stay specific. If the content supports it, include a year or ISO date (YYYY-MM-DD) in the title when that helps recall.
+- Imagine 3 to 5 realistic search queries someone would type to find this file later; the title should contain the main distinctive terms from those queries (names, organizations, form types, years, key numbers).
+- Title must be suitable for a filename. Do not use slashes, colons, quotes, or trailing punctuation.
+
+Metadata rules for search:
+- document_type: use a short canonical token (for example pay-stub, bank-statement, w-2, 1099-int, lease-agreement) and rely on keywords for brand-specific or long variants.
+- dates: include ISO dates (YYYY-MM-DD) when known. Also include salient non-ISO phrases from the document when useful (for example pay period ending, statement month, tax year). Prefer multiple entries when the document supplies multiple relevant dates.
+- identifiers: capture every stable reference that someone might search (invoice number, case number, policy number, confirmation code, last-4 of account, employee ID, ticket number). Use empty only when none appear.
+- people and organizations: include all prominent names as on the document; add a second spelling or obvious alternate only when it improves search (for example legal name versus common trade name) and is supported by the text.
+- keywords: 5 to 12 short terms. Include abbreviations, form codes, product names, alternate spellings, and synonymous labels a user might type (for example W-2, W2, Form W-2 when applicable). Terms in the title should generally also appear in keywords or structured fields so different index fields reinforce each other.
+- locations: include when they would plausibly appear in a search (city or state, property address fragment) and appear on the document.
+- language: set accurately; if mixed-language, note that in keywords.
+- Metadata must be factual and conservative. Prefer empty arrays or empty strings over guessing.
+
+Summary rules:
+- One or two sentences that stay factual and repeat the most search-important entities, dates, and identifiers already captured elsewhere (many systems index Subject or Description fields).
+- Avoid introducing new claims not supported by the document.
+
+Respond with JSON only using keys title, summary, and metadata.
+Metadata must be an object with keys: document_type, people, organizations, locations, dates, keywords, identifiers, language.
+""".strip()
 TEXT_EXTENSIONS = {
     ".txt",
     ".text",
@@ -865,18 +896,11 @@ def analyze_text_with_ollama(
 ) -> AnalysisResult:
     prompt = (
         "You are renaming archived documents.\n"
-        "Read the file content and produce a concise descriptive title, summary, and searchable metadata.\n"
-        "Rules:\n"
-        "- Title must be 3 to 10 words.\n"
-        "- Title must be specific, human-readable, and suitable for a filename.\n"
-        "- Do not include the original numeric filename.\n"
-        "- Do not use slashes, colons, quotes, or trailing punctuation.\n"
-        "- Summary must be 1 or 2 sentences.\n"
-        "- Metadata must be factual and conservative. Prefer empty arrays or empty strings over guessing.\n"
-        "- Keywords should be short search terms, ideally 3 to 8 items.\n"
-        "- If the document is ambiguous, choose the best factual title you can.\n"
-        "Respond with JSON only using keys title, summary, and metadata.\n"
-        "Metadata must be an object with keys: document_type, people, organizations, locations, dates, keywords, identifiers, language.\n\n"
+        "Read the file content and produce a title, summary, and searchable metadata.\n\n"
+        f"{DOCUMENT_ANALYSIS_PROMPT_RULES}\n\n"
+        "Additional rules for this source:\n"
+        "- Do not include the original numeric filename in the title.\n"
+        "- If the document is ambiguous, choose the best factual title and metadata you can.\n\n"
         f"Filename: {filename}\n"
         f"Content:\n{text}"
     )
@@ -907,17 +931,11 @@ def analyze_image_with_ollama(
     image_b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
     prompt = (
         "You are renaming archived scanned documents.\n"
-        "Look at the image and infer the most accurate concise title, summary, and searchable metadata you can.\n"
-        "Rules:\n"
-        "- Title must be 3 to 10 words.\n"
-        "- Title must be specific and suitable for a filename.\n"
-        "- Do not use slashes, colons, quotes, or trailing punctuation.\n"
-        "- Summary must be 1 or 2 sentences.\n"
-        "- Metadata must be factual and conservative. Prefer empty arrays or empty strings over guessing.\n"
-        "- Keywords should be short search terms, ideally 3 to 8 items.\n"
-        "- If some text is unreadable, use the visible clues and stay conservative.\n"
-        "Respond with JSON only using keys title, summary, and metadata.\n"
-        "Metadata must be an object with keys: document_type, people, organizations, locations, dates, keywords, identifiers, language.\n\n"
+        "Look at the image and infer the most accurate title, summary, and searchable metadata you can.\n\n"
+        f"{DOCUMENT_ANALYSIS_PROMPT_RULES}\n\n"
+        "If text in the image is partly unreadable, keep the title shorter and more conservative, "
+        "but still token-rich (document type, year, clearest organization or person names). "
+        "Prefer empty or partial metadata fields over guessing. Otherwise use the visible clues and stay conservative.\n\n"
         f"Original filename: {filename}"
     )
     payload = {
@@ -1574,12 +1592,28 @@ def validate_pdf_with_qlmanage(file_path: Path) -> str:
     return ""
 
 
+def strip_trailing_extension_from_title(title: str, extension: str) -> str:
+    """Drop trailing extension tokens that duplicate the source file's suffix.
+
+    The model sometimes includes ``.pdf`` (etc.) in the title; ``unique_destination``
+    then appends the real extension, producing ``name.pdf.pdf``.
+    """
+    if not extension:
+        return title
+    ext_lower = extension.lower()
+    base = title
+    while len(base) >= len(extension) and base.lower().endswith(ext_lower):
+        base = base[: -len(extension)].rstrip(" ._-")
+    return base
+
+
 def unique_destination(source: Path, title: str) -> Path:
     extension = source.suffix
-    candidate = source.with_name(f"{title}{extension}")
+    stem = strip_trailing_extension_from_title(title, extension)
+    candidate = source.with_name(f"{stem}{extension}")
     counter = 2
     while candidate.exists() and candidate != source:
-        candidate = source.with_name(f"{title} {counter}{extension}")
+        candidate = source.with_name(f"{stem} {counter}{extension}")
         counter += 1
     return candidate
 
