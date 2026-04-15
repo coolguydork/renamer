@@ -24,6 +24,21 @@ def test_main_invalid_exclude_regex(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert odr.main() == 1
 
 
+def test_main_repair_pdf_requires_qpdf(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello world " * 20, encoding="utf-8")
+
+    def which(name: str) -> str | None:
+        return None if name == "qpdf" else "/usr/bin/true"
+
+    monkeypatch.setattr(odr.shutil, "which", which)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", str(tmp_path), "--repair-pdf-if-needed", "--max-files", "1"],
+    )
+    assert odr.main() == 1
+
+
 def test_main_workers_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")
     monkeypatch.setattr(
@@ -231,8 +246,44 @@ def test_process_file_writes_audit_line(
     lines = log_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     row = json.loads(lines[0])
+    assert row.get("status") == "ok"
     assert row["title"] == "Final"
     assert "Final.txt" in row["renamed_path"]
+
+
+def test_process_file_writes_skipped_audit_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "bad.txt"
+    src.write_text("data", encoding="utf-8")
+
+    def boom(**kwargs: object) -> None:
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(odr, "analyze_file", boom)
+    log_path = tmp_path / "out.jsonl"
+    lock = Lock()
+    with log_path.open("w", encoding="utf-8") as handle:
+        odr.process_file(
+            file_path=src,
+            text_model="m",
+            vision_model="m",
+            ollama_url="http://127.0.0.1:11434",
+            backend="http",
+            dry_run=False,
+            write_spotlight_comment_flag=False,
+            write_pdf_metadata_flag=False,
+            pdf_backup_suffix=".bak.pdf",
+            validate_pdf_after_write=False,
+            delete_pdf_backup_on_success=False,
+            audit_handle=handle,
+            write_lock=lock,
+        )
+    row = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert row["status"] == "skipped"
+    assert row["skipped_reason"] == "model unavailable"
+    assert "renamed_path" not in row
 
 
 def test_report_outcome_skip_and_success(capsys: pytest.CaptureFixture[str]) -> None:

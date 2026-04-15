@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -107,3 +108,47 @@ def test_inspect_pdf_safety_missing_file_raises(tmp_path: Path) -> None:
     p = tmp_path / "nope.pdf"
     with pytest.raises(RuntimeError, match="inspect"):
         odr.inspect_pdf_safety(p)
+
+
+def test_pdf_structure_broken_when_exiftool_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"x")
+    monkeypatch.setattr(
+        odr.shutil,
+        "which",
+        lambda name: "/fake/exiftool" if name == "exiftool" else None,
+    )
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, "", "bad xref")
+
+    monkeypatch.setattr(odr.subprocess, "run", fake_run)
+    assert odr.pdf_structure_likely_broken_for_exiftool(pdf) is True
+
+
+def test_maybe_repair_skips_encrypted(tmp_path: Path) -> None:
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n/Encrypt\n")
+    msg = odr.maybe_repair_pdf_if_needed(pdf, dry_run=False, repair_backup_suffix=".bak.pdf")
+    assert msg == "skipped (encrypted PDF)"
+
+
+def test_maybe_repair_dry_run_when_structure_broken(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(odr, "pdf_structure_likely_broken_for_exiftool", lambda p: True)
+    msg = odr.maybe_repair_pdf_if_needed(pdf, dry_run=True, repair_backup_suffix=".bak.pdf")
+    assert msg and "would repair" in msg
+
+
+def test_maybe_repair_noop_for_healthy_pdf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(odr, "pdf_structure_likely_broken_for_exiftool", lambda p: False)
+    assert odr.maybe_repair_pdf_if_needed(pdf, dry_run=False, repair_backup_suffix=".bak.pdf") is None

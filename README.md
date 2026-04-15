@@ -88,6 +88,22 @@ python3 /path/to/ollama_document_renamer.py /path/to/archive \
   --validate-pdf-after-write
 ```
 
+Metadata writes use **`exiftool`** when it is installed.
+
+## PDF preview page and optional repair
+
+- **`--pdf-preview-page`** — For OCR and vision preview, render a specific **1-based** page (default `1`). Use when the first page is a blank cover or not representative.
+- **`--repair-pdf-if-needed`** — Before analysis, detect PDFs that **`exiftool`** cannot read (for example bad xref tables) or that fail **`qpdf --check`**, then rewrite them in place with **`qpdf`**. Requires **`qpdf`** on your PATH (`brew install qpdf`). Creates a backup beside the file (suffix from **`--pdf-repair-backup-suffix`**, default `.qpdf-repair-backup.pdf`). Skips encrypted PDFs.
+
+```bash
+python3 /path/to/ollama_document_renamer.py /path/to/archive \
+  --model llama3:latest \
+  --vision-model llava \
+  --pdf-preview-page 2 \
+  --repair-pdf-if-needed \
+  --write-pdf-metadata
+```
+
 ## Command-line reference
 
 All options match `ollama_document_renamer.py` (`python3 -m` is not used; run the file or the `ollama-document-renamer` entry point). Run with `--help` for the same text argparse prints.
@@ -120,9 +136,9 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--audit-log` | `rename_audit.jsonl` | JSONL path for original path, new path, summary, and structured metadata. |
+| `--audit-log` | `rename_audit.jsonl` | Append-only JSONL: one object per file. Successful renames use `"status": "ok"` plus paths, summary, title, and metadata; failures use `"status": "skipped"` plus `skipped_reason` (and optional `pdf_repair_status`). |
 | `--overwrite` | off | Allow replacing an existing audit log; starts a new log and **ignores `--resume`**. |
-| `--resume` | off | Skip files already recorded in the audit log (by renamed path); append new lines. Use with the same `directory` and `--audit-log` after an interrupted run. |
+| `--resume` | off | Skip files whose **successful** output path is already in the log; skipped/error lines do not count. Append new lines. Use with the same `directory` and `--audit-log` after an interrupted run. |
 
 ### What gets scanned
 
@@ -142,6 +158,9 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 | `--pdf-backup-suffix` | `.metadata-backup.pdf` | Suffix for the backup copy created beside the PDF before metadata writes. |
 | `--validate-pdf-after-write` | off | After a metadata write, validate the PDF; restore the backup automatically if validation fails. |
 | `--delete-pdf-backup-on-success` | off | After a successful metadata write (and optional validation), delete the backup file. |
+| `--pdf-preview-page` | `1` | For PDF OCR and vision preview, render this **1-based** page (see section above). |
+| `--repair-pdf-if-needed` | off | Before analysis, rewrite unreadable PDFs with **qpdf** (requires `qpdf` in PATH). |
+| `--pdf-repair-backup-suffix` | `.qpdf-repair-backup.pdf` | Backup suffix used before a qpdf repair. |
 
 ## Notes
 
@@ -149,7 +168,8 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 - Analysis can now run in parallel across files, but the final rename and metadata-write step is still coordinated to avoid filename collisions and audit-log corruption.
 - If a generated filename already exists, the script appends ` 2`, ` 3`, and so on.
 - Finder comments are a practical cross-file search target on macOS even when file formats expose very different internal metadata fields.
-- PDF metadata mode uses `exiftool` to fill a conservative set of Info and XMP fields, including title, subject/description, keywords, and a small set of corresponding XMP labels.
+- PDF metadata mode uses `exiftool` to fill a conservative set of Info and XMP fields, including title, subject/description, keywords, and a small set of corresponding XMP labels (install `exiftool` if you use `--write-pdf-metadata`).
+- Optional PDF repair uses `qpdf` only when you pass `--repair-pdf-if-needed`.
 - Each PDF metadata update creates a backup copy next to the PDF by default, using the suffix `.metadata-backup.pdf`.
 - Validation mode checks that the edited PDF can still be read by `exiftool`, recognized by `mdls`, and rendered by macOS Quick Look before considering the write successful.
 - For scanned PDFs, the preview is usually based on the first page thumbnail, so a vision model works best when the first page is representative.

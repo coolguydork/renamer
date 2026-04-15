@@ -118,6 +118,7 @@ class ProcessOutcome:
     result: AnalysisResult | None
     skipped_reason: str | None = None
     pdf_status: str | None = None
+    pdf_repair_status: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -242,6 +243,20 @@ def parse_args() -> argparse.Namespace:
             "For PDF OCR and vision preview, render this 1-based page (default: %(default)s). "
             "Use when the first pages are blank covers or placeholders."
         ),
+    )
+    parser.add_argument(
+        "--repair-pdf-if-needed",
+        action="store_true",
+        help=(
+            "Before analyzing each PDF, detect files that exiftool cannot parse (for example invalid xref) "
+            "or that fail qpdf --check, and rewrite them in place with qpdf. Creates a backup beside the file. "
+            "Requires qpdf in PATH (for example: brew install qpdf)."
+        ),
+    )
+    parser.add_argument(
+        "--pdf-repair-backup-suffix",
+        default=".qpdf-repair-backup.pdf",
+        help="Suffix for backups created before qpdf repair (default: %(default)s)",
     )
     parser.add_argument(
         "--max-files",
@@ -387,6 +402,13 @@ def main() -> int:
         print("--pdf-preview-page must be at least 1", file=sys.stderr)
         return 1
 
+    if args.repair_pdf_if_needed and not shutil.which("qpdf"):
+        print(
+            "--repair-pdf-if-needed requires qpdf in PATH (install with: brew install qpdf)",
+            file=sys.stderr,
+        )
+        return 1
+
     show_progress = sys.stderr.isatty() and not args.no_progress
 
     shutdown = Event()
@@ -430,6 +452,8 @@ def main() -> int:
                     validate_pdf_after_write=args.validate_pdf_after_write,
                     delete_pdf_backup_on_success=args.delete_pdf_backup_on_success,
                     pdf_preview_page=args.pdf_preview_page,
+                    repair_pdf_if_needed=args.repair_pdf_if_needed,
+                    pdf_repair_backup_suffix=args.pdf_repair_backup_suffix,
                     audit_handle=audit_handle,
                     write_lock=write_lock,
                 )
@@ -452,6 +476,8 @@ def main() -> int:
                         validate_pdf_after_write=args.validate_pdf_after_write,
                         delete_pdf_backup_on_success=args.delete_pdf_backup_on_success,
                         pdf_preview_page=args.pdf_preview_page,
+                        repair_pdf_if_needed=args.repair_pdf_if_needed,
+                        pdf_repair_backup_suffix=args.pdf_repair_backup_suffix,
                         audit_handle=audit_handle,
                         write_lock=write_lock,
                     )
@@ -491,6 +517,51 @@ def main() -> int:
     return 0
 
 
+def audit_dict_for_outcome(outcome: ProcessOutcome) -> dict[str, object]:
+    """Build one JSON object for the audit log (success and failure rows)."""
+    base_path = str(outcome.original_path)
+    if outcome.skipped_reason:
+        row: dict[str, object] = {
+            "status": "skipped",
+            "original_path": base_path,
+            "skipped_reason": outcome.skipped_reason,
+        }
+        if outcome.pdf_repair_status:
+            row["pdf_repair_status"] = outcome.pdf_repair_status
+        return row
+
+    assert outcome.renamed_path is not None
+    assert outcome.result is not None
+    row = {
+        "status": "ok",
+        "original_path": base_path,
+        "renamed_path": str(outcome.renamed_path),
+        "summary": outcome.result.summary,
+        "title": outcome.result.title,
+        "source_kind": outcome.result.source_kind,
+        "metadata": outcome.result.metadata,
+    }
+    if outcome.pdf_repair_status:
+        row["pdf_repair_status"] = outcome.pdf_repair_status
+    if outcome.pdf_status:
+        row["pdf_metadata_status"] = outcome.pdf_status
+    return row
+
+
+def write_audit_line(
+    audit_handle,
+    outcome: ProcessOutcome,
+    dry_run: bool,
+) -> None:
+    """Append one JSONL record when running for real with an audit log."""
+    if audit_handle is None or dry_run:
+        return
+    audit_handle.write(
+        json.dumps(audit_dict_for_outcome(outcome), ensure_ascii=False) + "\n"
+    )
+    audit_handle.flush()
+
+
 def load_completed_renamed_paths(audit_path: Path, root: Path) -> set[Path]:
     """Resolved paths of outputs already recorded in the audit (successful renames)."""
     root_resolved = root.resolve()
@@ -506,6 +577,8 @@ def load_completed_renamed_paths(audit_path: Path, root: Path) -> set[Path]:
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if row.get("status") == "skipped":
                     continue
                 renamed = row.get("renamed_path")
                 if not renamed or not isinstance(renamed, str):
@@ -611,7 +684,27 @@ def process_file(
     audit_handle,
     write_lock: Lock,
     pdf_preview_page: int = 1,
+    repair_pdf_if_needed: bool = False,
+    pdf_repair_backup_suffix: str = ".qpdf-repair-backup.pdf",
 ) -> ProcessOutcome:
+    pdf_repair_status: str | None = None
+    if repair_pdf_if_needed and file_path.suffix.lower() in PDF_EXTENSIONS:
+        try:
+            pdf_repair_status = maybe_repair_pdf_if_needed(
+                file_path=file_path,
+                dry_run=dry_run,
+                repair_backup_suffix=pdf_repair_backup_suffix,
+            )
+        except RuntimeError as exc:
+            outcome = ProcessOutcome(
+                original_path=file_path,
+                renamed_path=None,
+                result=None,
+                skipped_reason=f"PDF repair failed: {exc}",
+            )
+            write_audit_line(audit_handle, outcome, dry_run)
+            return outcome
+
     try:
         result = analyze_file(
             file_path=file_path,
@@ -622,21 +715,27 @@ def process_file(
             pdf_preview_page=pdf_preview_page,
         )
     except Exception as exc:  # noqa: BLE001
-        return ProcessOutcome(
+        outcome = ProcessOutcome(
             original_path=file_path,
             renamed_path=None,
             result=None,
             skipped_reason=str(exc),
+            pdf_repair_status=pdf_repair_status,
         )
+        write_audit_line(audit_handle, outcome, dry_run)
+        return outcome
 
     safe_title = sanitize_title(result.title)
     if not safe_title:
-        return ProcessOutcome(
+        outcome = ProcessOutcome(
             original_path=file_path,
             renamed_path=None,
             result=result,
             skipped_reason="model returned an empty title",
+            pdf_repair_status=pdf_repair_status,
         )
+        write_audit_line(audit_handle, outcome, dry_run)
+        return outcome
 
     with write_lock:
         destination = unique_destination(file_path, safe_title)
@@ -658,29 +757,24 @@ def process_file(
                 except RuntimeError as exc:
                     pdf_status = f"skipped ({exc})"
 
-            if audit_handle is not None:
-                audit_handle.write(
-                    json.dumps(
-                        {
-                            "original_path": str(file_path),
-                            "renamed_path": str(destination),
-                            "summary": result.summary,
-                            "title": result.title,
-                            "source_kind": result.source_kind,
-                            "metadata": result.metadata,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-                audit_handle.flush()
+            outcome = ProcessOutcome(
+                original_path=file_path,
+                renamed_path=destination,
+                result=result,
+                pdf_status=pdf_status,
+                pdf_repair_status=pdf_repair_status,
+            )
+            write_audit_line(audit_handle, outcome, dry_run)
+        else:
+            outcome = ProcessOutcome(
+                original_path=file_path,
+                renamed_path=destination,
+                result=result,
+                pdf_status=None,
+                pdf_repair_status=pdf_repair_status,
+            )
 
-    return ProcessOutcome(
-        original_path=file_path,
-        renamed_path=destination,
-        result=result,
-        pdf_status=pdf_status,
-    )
+    return outcome
 
 
 def report_outcome(outcome: ProcessOutcome, dry_run: bool) -> None:
@@ -702,6 +796,8 @@ def report_outcome(outcome: ProcessOutcome, dry_run: bool) -> None:
     metadata_preview = format_metadata_preview(outcome.result.metadata)
     if metadata_preview:
         tqdm.write(f"  Metadata: {metadata_preview}")
+    if outcome.pdf_repair_status:
+        tqdm.write(f"  PDF repair: {outcome.pdf_repair_status}")
     if outcome.pdf_status:
         tqdm.write(f"  PDF metadata: {outcome.pdf_status}")
 
@@ -1546,6 +1642,99 @@ def build_pdf_backup_path(file_path: Path, backup_suffix: str) -> Path:
     if not suffix.lower().endswith(".pdf"):
         suffix = f"{suffix}.pdf"
     return file_path.with_name(f"{file_path.stem}{suffix}")
+
+
+def pdf_structure_likely_broken_for_exiftool(file_path: Path) -> bool:
+    """Return True when the PDF is likely to fail exiftool (and similar tools), e.g. bad xref."""
+    if shutil.which("exiftool"):
+        completed = subprocess.run(
+            ["exiftool", "-m", "-q", "-q", "-s", "-s", "-PDF:Version", str(file_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return True
+    elif shutil.which("qpdf"):
+        completed = subprocess.run(
+            ["qpdf", "--check", str(file_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return True
+    return False
+
+
+def repair_pdf_with_qpdf(file_path: Path, backup_suffix: str) -> Path:
+    """Rewrite PDF with qpdf in place. Returns the backup path. Restores the file on failure."""
+    if not shutil.which("qpdf"):
+        raise RuntimeError("qpdf is not available")
+
+    backup_path = build_pdf_backup_path(file_path, backup_suffix)
+    if backup_path.exists():
+        raise RuntimeError(
+            f"repair backup already exists at {backup_path}; move it or choose a different "
+            "--pdf-repair-backup-suffix"
+        )
+    shutil.copy2(file_path, backup_path)
+    fd, tmp_name = tempfile.mkstemp(suffix=".pdf", prefix=".qpdf-", dir=file_path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        completed = subprocess.run(
+            ["qpdf", str(file_path), str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise RuntimeError(detail[:500] if detail else "qpdf failed")
+        if not tmp_path.is_file() or tmp_path.stat().st_size < 16:
+            raise RuntimeError("qpdf produced empty or invalid output")
+        if shutil.which("exiftool"):
+            verify = subprocess.run(
+                ["exiftool", "-m", "-q", "-q", "-s", "-s", "-PDF:Version", str(tmp_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if verify.returncode != 0:
+                raise RuntimeError("repaired PDF still fails exiftool read check")
+        os.replace(tmp_path, file_path)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        if backup_path.exists():
+            shutil.copy2(backup_path, file_path)
+        raise
+    return backup_path
+
+
+def maybe_repair_pdf_if_needed(
+    file_path: Path,
+    *,
+    dry_run: bool,
+    repair_backup_suffix: str,
+) -> str | None:
+    """
+    If the PDF appears unreadable by exiftool (or fails qpdf --check when exiftool is absent),
+    rewrite it with qpdf. In dry-run mode, only reports what would happen.
+    """
+    state = inspect_pdf_safety(file_path)
+    if state["is_encrypted"]:
+        return "skipped (encrypted PDF)"
+    if not pdf_structure_likely_broken_for_exiftool(file_path):
+        return None
+    if dry_run:
+        return "would repair with qpdf (structure not readable by exiftool / qpdf check failed)"
+    repair_pdf_with_qpdf(file_path, repair_backup_suffix)
+    return "repaired with qpdf (backup beside original)"
 
 
 def inspect_pdf_safety(file_path: Path) -> dict[str, bool]:

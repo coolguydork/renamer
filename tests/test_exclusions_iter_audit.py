@@ -97,3 +97,23 @@ def test_load_completed_renamed_paths_filters_and_skips_bad_lines(tmp_path: Path
     )
     completed = odr.load_completed_renamed_paths(log, root)
     assert completed == {inside.resolve()}
+
+
+def test_load_completed_renamed_paths_ignores_skipped_status(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    would_retry = root / "retry_me.pdf"
+    would_retry.write_text("x", encoding="utf-8")
+    log = root / "audit.jsonl"
+    log.write_text(
+        json.dumps(
+            {
+                "status": "skipped",
+                "original_path": str(would_retry),
+                "skipped_reason": "bad xref",
+                "renamed_path": str(would_retry),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert odr.load_completed_renamed_paths(log, root) == set()
