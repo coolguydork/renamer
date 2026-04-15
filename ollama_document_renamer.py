@@ -666,21 +666,26 @@ def process_file(
 
 
 def report_outcome(outcome: ProcessOutcome, dry_run: bool) -> None:
+    # Use tqdm.write so messages scroll above an active tqdm bar instead of
+    # interleaving with stderr redraws (bar uses sys.stderr; logs use stdout/stderr).
     if outcome.skipped_reason:
-        print(f"SKIP {outcome.original_path.name}: {outcome.skipped_reason}", file=sys.stderr)
+        tqdm.write(
+            f"SKIP {outcome.original_path.name}: {outcome.skipped_reason}",
+            file=sys.stderr,
+        )
         return
 
     assert outcome.renamed_path is not None
     assert outcome.result is not None
 
     action = "WOULD RENAME" if dry_run else "RENAMED"
-    print(f"{action}: {outcome.original_path.name} -> {outcome.renamed_path.name}")
-    print(f"  Summary: {outcome.result.summary}")
+    tqdm.write(f"{action}: {outcome.original_path.name} -> {outcome.renamed_path.name}")
+    tqdm.write(f"  Summary: {outcome.result.summary}")
     metadata_preview = format_metadata_preview(outcome.result.metadata)
     if metadata_preview:
-        print(f"  Metadata: {metadata_preview}")
+        tqdm.write(f"  Metadata: {metadata_preview}")
     if outcome.pdf_status:
-        print(f"  PDF metadata: {outcome.pdf_status}")
+        tqdm.write(f"  PDF metadata: {outcome.pdf_status}")
 
 
 def analyze_file(
