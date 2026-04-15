@@ -234,6 +234,16 @@ def parse_args() -> argparse.Namespace:
         help="Delete the PDF backup after a successful metadata write and optional validation",
     )
     parser.add_argument(
+        "--pdf-preview-page",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "For PDF OCR and vision preview, render this 1-based page (default: %(default)s). "
+            "Use when the first pages are blank covers or placeholders."
+        ),
+    )
+    parser.add_argument(
         "--max-files",
         type=int,
         default=None,
@@ -373,6 +383,10 @@ def main() -> int:
         print("--workers must be at least 1", file=sys.stderr)
         return 1
 
+    if args.pdf_preview_page < 1:
+        print("--pdf-preview-page must be at least 1", file=sys.stderr)
+        return 1
+
     show_progress = sys.stderr.isatty() and not args.no_progress
 
     shutdown = Event()
@@ -415,6 +429,7 @@ def main() -> int:
                     pdf_backup_suffix=args.pdf_backup_suffix,
                     validate_pdf_after_write=args.validate_pdf_after_write,
                     delete_pdf_backup_on_success=args.delete_pdf_backup_on_success,
+                    pdf_preview_page=args.pdf_preview_page,
                     audit_handle=audit_handle,
                     write_lock=write_lock,
                 )
@@ -436,6 +451,7 @@ def main() -> int:
                         pdf_backup_suffix=args.pdf_backup_suffix,
                         validate_pdf_after_write=args.validate_pdf_after_write,
                         delete_pdf_backup_on_success=args.delete_pdf_backup_on_success,
+                        pdf_preview_page=args.pdf_preview_page,
                         audit_handle=audit_handle,
                         write_lock=write_lock,
                     )
@@ -594,6 +610,7 @@ def process_file(
     delete_pdf_backup_on_success: bool,
     audit_handle,
     write_lock: Lock,
+    pdf_preview_page: int = 1,
 ) -> ProcessOutcome:
     try:
         result = analyze_file(
@@ -602,6 +619,7 @@ def process_file(
             vision_model=vision_model,
             ollama_url=ollama_url,
             backend=backend,
+            pdf_preview_page=pdf_preview_page,
         )
     except Exception as exc:  # noqa: BLE001
         return ProcessOutcome(
@@ -694,6 +712,7 @@ def analyze_file(
     vision_model: str,
     ollama_url: str,
     backend: str,
+    pdf_preview_page: int = 1,
 ) -> AnalysisResult:
     suffix = file_path.suffix.lower()
     text = extract_text(file_path)
@@ -732,7 +751,7 @@ def analyze_file(
         )
 
     if suffix in PDF_EXTENSIONS:
-        preview_path = render_pdf_preview(file_path)
+        preview_path = render_pdf_preview(file_path, page=pdf_preview_page)
         try:
             ocr_text = extract_text_with_ocr(preview_path)
             if meaningful_text(ocr_text):
@@ -858,7 +877,43 @@ def truncate_text(text: str) -> str:
     return collapsed[:MAX_TEXT_CHARS]
 
 
-def render_pdf_preview(file_path: Path) -> Path:
+def render_pdf_preview(file_path: Path, page: int = 1) -> Path:
+    if page < 1:
+        raise ValueError("page must be at least 1")
+
+    if page > 1:
+        swift_path = Path(__file__).with_name("macos_pdf_page_render.swift")
+        if not swift_path.exists():
+            raise RuntimeError(
+                "macos_pdf_page_render.swift not found (needed for --pdf-preview-page > 1)"
+            )
+        if not shutil.which("swift"):
+            raise RuntimeError("swift is required for --pdf-preview-page > 1")
+        preview_out = Path(tempfile.mkstemp(suffix=".png")[1])
+        try:
+            completed = subprocess.run(
+                [
+                    "swift",
+                    str(swift_path),
+                    str(file_path),
+                    str(page),
+                    str(preview_out),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            preview_out.unlink(missing_ok=True)
+            raise RuntimeError(f"unable to render PDF page {page}: {exc}") from exc
+        if completed.returncode != 0:
+            preview_out.unlink(missing_ok=True)
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(
+                f"unable to render PDF page {page}: {detail[:400] if detail else 'swift failed'}"
+            )
+        return preview_out
+
     if not shutil.which("qlmanage"):
         raise RuntimeError("qlmanage is not available for PDF preview rendering")
 

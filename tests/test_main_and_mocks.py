@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from threading import Lock
@@ -338,6 +339,49 @@ def test_render_pdf_preview_requires_qlmanage(monkeypatch: pytest.MonkeyPatch, t
     p.write_bytes(b"%PDF-1.4\n")
     with pytest.raises(RuntimeError, match="qlmanage"):
         odr.render_pdf_preview(p)
+
+
+def test_render_pdf_preview_page_gt_one_requires_swift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(odr.shutil, "which", lambda name: None if name == "swift" else "/bin/qlmanage")
+    p = tmp_path / "a.pdf"
+    p.write_bytes(b"%PDF-1.4\n")
+    with pytest.raises(RuntimeError, match="swift"):
+        odr.render_pdf_preview(p, page=2)
+
+
+def test_render_pdf_preview_page_gt_one_runs_swift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert cmd[0] == "swift"
+        assert "macos_pdf_page_render.swift" in cmd[1]
+        assert cmd[3] == "2"
+        Path(cmd[4]).write_bytes(b"fakepng")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(odr.subprocess, "run", fake_run)
+    monkeypatch.setattr(odr.shutil, "which", lambda name: "/swift" if name == "swift" else None)
+
+    out = odr.render_pdf_preview(pdf, page=2)
+    try:
+        assert out.read_bytes() == b"fakepng"
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_main_rejects_pdf_preview_page_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", str(tmp_path), "--pdf-preview-page", "0", "--dry-run"],
+    )
+    assert odr.main() == 1
 
 
 def test_drain_executor_futures_handles_cancelled(

@@ -31,6 +31,7 @@ ollama-document-renamer = "ollama_document_renamer:main"
 include = [
   "/ollama_document_renamer.py",
   "/macos_ocr.swift",
+  "/macos_pdf_page_render.swift",
   "/README.md",
 ]
 
@@ -38,6 +39,7 @@ include = [
 only-include = [
   "ollama_document_renamer.py",
   "macos_ocr.swift",
+  "macos_pdf_page_render.swift",
 ]
 
 [project.optional-dependencies]
