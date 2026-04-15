@@ -94,6 +94,7 @@ Metadata writes use **`exiftool`** when it is installed.
 
 - **`--pdf-preview-page`** — For OCR and vision preview, render a specific **1-based** page (default `1`). Use when the first page is a blank cover or not representative.
 - **`--repair-pdf-if-needed`** — Before analysis, detect PDFs that **`exiftool`** cannot read (for example bad xref tables) or that fail **`qpdf --check`**, then rewrite them in place with **`qpdf`**. Requires **`qpdf`** on your PATH (`brew install qpdf`). Creates a backup beside the file (suffix from **`--pdf-repair-backup-suffix`**, default `.qpdf-repair-backup.pdf`). Skips encrypted PDFs.
+- **`--repair-pdf-macos-pdfkit`** — When a PDF is unreadable by **`exiftool`**, resave it with **PDFKit** (the same macOS framework Preview uses for many save paths). Closest automated equivalent to opening in Preview and printing/saving as PDF. Requires **`swift`** and the bundled **`macos_pdf_resave.swift`**. Use **alone** (no `qpdf`), or **together with** `--repair-pdf-if-needed` to run **`qpdf` first** and PDFKit **only if** the file is **still** unreadable. Backup suffix: **`--pdf-pdfkit-repair-backup-suffix`** (default `.pdfkit-repair-backup.pdf`).
 
 ```bash
 python3 /path/to/ollama_document_renamer.py /path/to/archive \
@@ -101,6 +102,7 @@ python3 /path/to/ollama_document_renamer.py /path/to/archive \
   --vision-model llava \
   --pdf-preview-page 2 \
   --repair-pdf-if-needed \
+  --repair-pdf-macos-pdfkit \
   --write-pdf-metadata
 ```
 
@@ -161,6 +163,8 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 | `--pdf-preview-page` | `1` | For PDF OCR and vision preview, render this **1-based** page (see section above). |
 | `--repair-pdf-if-needed` | off | Before analysis, rewrite unreadable PDFs with **qpdf** (requires `qpdf` in PATH). |
 | `--pdf-repair-backup-suffix` | `.qpdf-repair-backup.pdf` | Backup suffix used before a qpdf repair. |
+| `--repair-pdf-macos-pdfkit` | off | Resave unreadable PDFs with **PDFKit** (`swift` + `macos_pdf_resave.swift`). Combine with `--repair-pdf-if-needed` to try qpdf first, then PDFKit if still unreadable. |
+| `--pdf-pdfkit-repair-backup-suffix` | `.pdfkit-repair-backup.pdf` | Backup suffix used before a PDFKit resave. |
 
 ## Notes
 
@@ -169,7 +173,7 @@ All options match `ollama_document_renamer.py` (`python3 -m` is not used; run th
 - If a generated filename already exists, the script appends ` 2`, ` 3`, and so on.
 - Finder comments are a practical cross-file search target on macOS even when file formats expose very different internal metadata fields.
 - PDF metadata mode uses `exiftool` to fill a conservative set of Info and XMP fields, including title, subject/description, keywords, and a small set of corresponding XMP labels (install `exiftool` if you use `--write-pdf-metadata`).
-- Optional PDF repair uses `qpdf` only when you pass `--repair-pdf-if-needed`.
+- Optional PDF repair: `--repair-pdf-if-needed` uses `qpdf`; `--repair-pdf-macos-pdfkit` resaves via PDFKit (similar to fixing files in Preview).
 - Each PDF metadata update creates a backup copy next to the PDF by default, using the suffix `.metadata-backup.pdf`.
 - Validation mode checks that the edited PDF can still be read by `exiftool`, recognized by `mdls`, and rendered by macOS Quick Look before considering the write successful.
 - For scanned PDFs, the preview is usually based on the first page thumbnail, so a vision model works best when the first page is representative.

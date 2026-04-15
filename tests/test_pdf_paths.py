@@ -143,6 +143,24 @@ def test_maybe_repair_dry_run_when_structure_broken(
     monkeypatch.setattr(odr, "pdf_structure_likely_broken_for_exiftool", lambda p: True)
     msg = odr.maybe_repair_pdf_if_needed(pdf, dry_run=True, repair_backup_suffix=".bak.pdf")
     assert msg and "would repair" in msg
+    assert "qpdf" in msg
+
+
+def test_maybe_repair_dry_run_pdfkit_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    monkeypatch.setattr(odr, "pdf_structure_likely_broken_for_exiftool", lambda p: True)
+    msg = odr.maybe_repair_pdf_if_needed(
+        pdf,
+        dry_run=True,
+        repair_backup_suffix=".bak.pdf",
+        use_qpdf=False,
+        use_macos_pdfkit=True,
+    )
+    assert msg and "PDFKit" in msg
+    assert "qpdf" not in msg
 
 
 def test_maybe_repair_noop_for_healthy_pdf(

@@ -259,6 +259,20 @@ def parse_args() -> argparse.Namespace:
         help="Suffix for backups created before qpdf repair (default: %(default)s)",
     )
     parser.add_argument(
+        "--repair-pdf-macos-pdfkit",
+        action="store_true",
+        help=(
+            "When a PDF is unreadable by exiftool, resave it with macOS PDFKit (same engine family as "
+            "Preview). Use alone, or with --repair-pdf-if-needed to run qpdf first and PDFKit only if "
+            "still unreadable. Requires swift and macos_pdf_resave.swift beside the script."
+        ),
+    )
+    parser.add_argument(
+        "--pdf-pdfkit-repair-backup-suffix",
+        default=".pdfkit-repair-backup.pdf",
+        help="Suffix for backups created before a PDFKit resave (default: %(default)s)",
+    )
+    parser.add_argument(
         "--max-files",
         type=int,
         default=None,
@@ -409,6 +423,22 @@ def main() -> int:
         )
         return 1
 
+    if args.repair_pdf_macos_pdfkit:
+        if not shutil.which("swift"):
+            print(
+                "--repair-pdf-macos-pdfkit requires swift (install Xcode Command Line Tools)",
+                file=sys.stderr,
+            )
+            return 1
+        pdfkit_swift = Path(__file__).resolve().with_name("macos_pdf_resave.swift")
+        if not pdfkit_swift.is_file():
+            print(
+                f"--repair-pdf-macos-pdfkit requires {pdfkit_swift.name} next to the script "
+                f"(expected at {pdfkit_swift})",
+                file=sys.stderr,
+            )
+            return 1
+
     show_progress = sys.stderr.isatty() and not args.no_progress
 
     shutdown = Event()
@@ -454,6 +484,8 @@ def main() -> int:
                     pdf_preview_page=args.pdf_preview_page,
                     repair_pdf_if_needed=args.repair_pdf_if_needed,
                     pdf_repair_backup_suffix=args.pdf_repair_backup_suffix,
+                    repair_pdf_macos_pdfkit=args.repair_pdf_macos_pdfkit,
+                    pdf_pdfkit_repair_backup_suffix=args.pdf_pdfkit_repair_backup_suffix,
                     audit_handle=audit_handle,
                     write_lock=write_lock,
                 )
@@ -478,6 +510,8 @@ def main() -> int:
                         pdf_preview_page=args.pdf_preview_page,
                         repair_pdf_if_needed=args.repair_pdf_if_needed,
                         pdf_repair_backup_suffix=args.pdf_repair_backup_suffix,
+                        repair_pdf_macos_pdfkit=args.repair_pdf_macos_pdfkit,
+                        pdf_pdfkit_repair_backup_suffix=args.pdf_pdfkit_repair_backup_suffix,
                         audit_handle=audit_handle,
                         write_lock=write_lock,
                     )
@@ -686,14 +720,22 @@ def process_file(
     pdf_preview_page: int = 1,
     repair_pdf_if_needed: bool = False,
     pdf_repair_backup_suffix: str = ".qpdf-repair-backup.pdf",
+    repair_pdf_macos_pdfkit: bool = False,
+    pdf_pdfkit_repair_backup_suffix: str = ".pdfkit-repair-backup.pdf",
 ) -> ProcessOutcome:
     pdf_repair_status: str | None = None
-    if repair_pdf_if_needed and file_path.suffix.lower() in PDF_EXTENSIONS:
+    if (
+        (repair_pdf_if_needed or repair_pdf_macos_pdfkit)
+        and file_path.suffix.lower() in PDF_EXTENSIONS
+    ):
         try:
             pdf_repair_status = maybe_repair_pdf_if_needed(
                 file_path=file_path,
                 dry_run=dry_run,
                 repair_backup_suffix=pdf_repair_backup_suffix,
+                pdfkit_backup_suffix=pdf_pdfkit_repair_backup_suffix,
+                use_qpdf=repair_pdf_if_needed,
+                use_macos_pdfkit=repair_pdf_macos_pdfkit,
             )
         except RuntimeError as exc:
             outcome = ProcessOutcome(
@@ -1716,25 +1758,100 @@ def repair_pdf_with_qpdf(file_path: Path, backup_suffix: str) -> Path:
     return backup_path
 
 
+def pdfkit_resave_swift_path() -> Path:
+    return Path(__file__).resolve().with_name("macos_pdf_resave.swift")
+
+
+def repair_pdf_with_macos_pdfkit(file_path: Path, backup_suffix: str) -> Path:
+    """Resave PDF via PDFKit (Preview-class rewrite). Returns backup path; restores file on failure."""
+    swift = pdfkit_resave_swift_path()
+    if not swift.is_file():
+        raise RuntimeError(f"{swift.name} not found (needed for PDFKit repair)")
+    if not shutil.which("swift"):
+        raise RuntimeError("swift is required for PDFKit PDF repair")
+
+    backup_path = build_pdf_backup_path(file_path, backup_suffix)
+    if backup_path.exists():
+        raise RuntimeError(
+            f"PDFKit repair backup already exists at {backup_path}; move it or choose a different "
+            "--pdf-pdfkit-repair-backup-suffix"
+        )
+    shutil.copy2(file_path, backup_path)
+    fd, tmp_name = tempfile.mkstemp(suffix=".pdf", prefix=".pdfkit-", dir=file_path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        completed = subprocess.run(
+            ["swift", str(swift), str(file_path), str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise RuntimeError(detail[:500] if detail else "swift PDFKit resave failed")
+        if not tmp_path.is_file() or tmp_path.stat().st_size < 16:
+            raise RuntimeError("PDFKit produced empty or invalid output")
+        if shutil.which("exiftool"):
+            verify = subprocess.run(
+                ["exiftool", "-m", "-q", "-q", "-s", "-s", "-PDF:Version", str(tmp_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if verify.returncode != 0:
+                raise RuntimeError("PDFKit-resaved PDF still fails exiftool read check")
+        os.replace(tmp_path, file_path)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        if backup_path.exists():
+            shutil.copy2(backup_path, file_path)
+        raise
+    return backup_path
+
+
 def maybe_repair_pdf_if_needed(
     file_path: Path,
     *,
     dry_run: bool,
     repair_backup_suffix: str,
+    pdfkit_backup_suffix: str = ".pdfkit-repair-backup.pdf",
+    use_qpdf: bool = True,
+    use_macos_pdfkit: bool = False,
 ) -> str | None:
     """
     If the PDF appears unreadable by exiftool (or fails qpdf --check when exiftool is absent),
-    rewrite it with qpdf. In dry-run mode, only reports what would happen.
+    optionally rewrite with qpdf and/or resave with macOS PDFKit. In dry-run mode, only reports.
     """
     state = inspect_pdf_safety(file_path)
     if state["is_encrypted"]:
         return "skipped (encrypted PDF)"
     if not pdf_structure_likely_broken_for_exiftool(file_path):
         return None
+    if not use_qpdf and not use_macos_pdfkit:
+        return None
+
+    labels: list[str] = []
+    if use_qpdf:
+        labels.append("qpdf")
+    if use_macos_pdfkit:
+        labels.append("macOS PDFKit")
     if dry_run:
-        return "would repair with qpdf (structure not readable by exiftool / qpdf check failed)"
-    repair_pdf_with_qpdf(file_path, repair_backup_suffix)
-    return "repaired with qpdf (backup beside original)"
+        return f"would repair ({' then '.join(labels)})"
+
+    steps: list[str] = []
+    if use_qpdf:
+        repair_pdf_with_qpdf(file_path, repair_backup_suffix)
+        steps.append("qpdf")
+    if use_macos_pdfkit:
+        if not use_qpdf or pdf_structure_likely_broken_for_exiftool(file_path):
+            repair_pdf_with_macos_pdfkit(file_path, pdfkit_backup_suffix)
+            steps.append("macOS PDFKit")
+    return f"repaired with {' then '.join(steps)} (backups beside original)"
 
 
 def inspect_pdf_safety(file_path: Path) -> dict[str, bool]:

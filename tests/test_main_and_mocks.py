@@ -39,6 +39,17 @@ def test_main_repair_pdf_requires_qpdf(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert odr.main() == 1
 
 
+def test_main_repair_pdf_macos_pdfkit_requires_swift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello world " * 20, encoding="utf-8")
+    monkeypatch.setattr(odr.shutil, "which", lambda name: None if name == "swift" else "/usr/bin/true")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", str(tmp_path), "--repair-pdf-macos-pdfkit", "--max-files", "1"],
+    )
+    assert odr.main() == 1
+
+
 def test_main_workers_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")
     monkeypatch.setattr(

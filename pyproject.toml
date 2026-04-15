@@ -32,6 +32,7 @@ include = [
   "/ollama_document_renamer.py",
   "/macos_ocr.swift",
   "/macos_pdf_page_render.swift",
+  "/macos_pdf_resave.swift",
   "/README.md",
 ]
 
@@ -40,6 +41,7 @@ only-include = [
   "ollama_document_renamer.py",
   "macos_ocr.swift",
   "macos_pdf_page_render.swift",
+  "macos_pdf_resave.swift",
 ]
 
 [project.optional-dependencies]
